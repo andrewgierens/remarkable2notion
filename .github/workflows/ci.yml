@@ -1,0 +1,114 @@
+name: CI
+
+# The PR gate. Everything here must pass before a pull request merges — see
+# the required status checks on master.
+#
+# This runs on pull_request only. The release workflows carry their own copies
+# of the test jobs and run on push to master, so nothing here would be a
+# second run of the same thing.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon:
+    name: Daemon (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: app/daemon/go.sum
+      - name: Vet
+        run: go vet ./...
+        working-directory: app/daemon
+      - name: Test
+        run: go test ./...
+        working-directory: app/daemon
+      # The daemon ships as a static binary for two device architectures, and
+      # a cross-compile break is invisible to a host-arch test run.
+      - name: Cross-compile for both devices
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          GOARCH=arm GOARM=7 go build -trimpath -ldflags "-s -w" \
+            -o "$RUNNER_TEMP/notion-bridge-rm2" ./cmd/notion-bridge
+          GOARCH=arm64 go build -trimpath -ldflags "-s -w" \
+            -o "$RUNNER_TEMP/notion-bridge-rmpp" ./cmd/notion-bridge
+          file "$RUNNER_TEMP"/notion-bridge-*
+        working-directory: app/daemon
+
+  qmd:
+    name: UI patch (QMLDiff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: qmldiff has no releases, and a floating master would let an
+      # upstream change break this gate with no change on our side.
+      - name: Cache qmldiff
+        id: cache-qmldiff
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/qmldiff
+          key: qmldiff-25681c3cc7addb93fdbb41ceac1f1bdce8b2625d
+      - name: Build qmldiff
+        if: steps.cache-qmldiff.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked --git https://github.com/asivery/qmldiff \
+            --rev 25681c3cc7addb93fdbb41ceac1f1bdce8b2625d
+      # Without QMLDIFF set, validate.sh only does structural checks; with it,
+      # the diffs are actually applied to the mock QML tree in app/qmd/testdata.
+      - name: Validate and apply the diffs
+        env:
+          QMLDIFF: /home/runner/.cargo/bin/qmldiff
+        run: ./app/qmd/scripts/validate.sh
+      # The debug patch is generated, so a hand-edit or a stale regeneration
+      # would otherwise ship traces that no longer match the real patch.
+      - name: Debug patch is in step with its source
+        run: |
+          python3 app/qmd/scripts/make-debug.py
+          git diff --exit-code -- app/qmd/send-to-notion-debug.qmd ||
+            { echo "::error::send-to-notion-debug.qmd is stale — run app/qmd/scripts/make-debug.py"; exit 1; }
+
+  broker:
+    name: Broker (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test
+        run: npm test
+        working-directory: server
+      - name: Install wrangler
+        run: npm install
+        working-directory: server
+      # Builds and type-checks the Worker bundle against wrangler.jsonc,
+      # including the Durable Object binding. Needs no Cloudflare credentials,
+      # so it works on pull requests from forks.
+      - name: Worker builds
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/worker"
+        working-directory: server
+      - name: Container builds
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          push: false
+
+  velbuild:
+    name: Vellum package
+    runs-on: ubuntu-latest   # x86_64 + docker, which vbuild requires
+    steps:
+      - uses: actions/checkout@v4
+      # STRICT=1 turns "vbuild unavailable" into a failure, so the
+      # apkbuild-lint leg can never be silently skipped on a runner.
+      - name: Lint VELBUILD
+        env:
+          STRICT: "1"
+        run: ./packaging/vellum/validate.sh
