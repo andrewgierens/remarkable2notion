@@ -1,0 +1,99 @@
+name: Release broker
+
+# The broker ships independently of the device app: it is a separate artefact
+# with its own lifecycle, so a change to one does not re-release the other.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "server/**"
+      - ".github/workflows/release-broker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: release-broker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Single source of truth for the image tag.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=v0.1.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  # Gates everything below. One broker implementation serves both the
+  # container and the Worker, so this covers each of them.
+  test-broker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test broker
+        run: npm test
+        working-directory: server
+
+  # Publish the self-hosting image to the repo's GHCR registry.
+  publish-broker:
+    needs: [version, test-broker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # push the image to GHCR
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-broker" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          push: true
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=broker
+          cache-to: type=gha,scope=broker,mode=max
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ needs.version.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+
+  # Roll the hosted deployment out to Cloudflare Workers.
+  deploy-broker:
+    needs: [publish-broker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # wranglerVersion must be pinned: wrangler-action@v3 installs 3.90.0 by
+      # default, which predates wrangler.jsonc support and so reads no config
+      # at all — it fails with "Missing entry-point". Keep this in step with
+      # the devDependency range in server/package.json.
+      - name: Validate worker config
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: server
+          wranglerVersion: "4"
+          command: deploy --dry-run
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: server
+          wranglerVersion: "4"

@@ -1,0 +1,17 @@
+{
+  "name": "remarkable2notion-broker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "rm-notion pairing broker: one implementation, deployed to Cloudflare Workers or run as a server",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/node.js",
+    "test": "node --test",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,35 @@
+// Cloudflare Worker deployment of the rm-notion pairing broker.
+// The routing and logic are the shared src/broker.js; this deployment supplies
+// Durable Objects as storage, so the token handoff stays exactly-once. The
+// server deployment of the same code is src/node.js.
+//
+// One-time setup (see README.md):
+//   wrangler secret put NOTION_CLIENT_ID
+//   wrangler secret put NOTION_CLIENT_SECRET
+// The hostname below must be a zone on the deploying Cloudflare account;
+// wrangler creates the DNS record and certificate on first deploy.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rm-notion-broker",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "rmk2notion.tonytheprwn.dev", "custom_domain": true }
+  ],
+  "vars": {
+    "PUBLIC_URL": "https://rmk2notion.tonytheprwn.dev",
+    "REDIRECT_URI": "https://rmk2notion.tonytheprwn.dev/callback"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "PAIRINGS", "class_name": "Pairing" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Pairing"] }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

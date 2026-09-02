@@ -1,0 +1,913 @@
+; GENERATED FILE — do not edit. Regenerate after changing
+; send-to-notion.qmd:
+;
+;     python3 app/qmd/scripts/make-debug.py
+;
+; rm-notion — Send to Notion (QMLDiff / .qmd for qt-resource-rebuilder)
+;
+; Requires xovi with qt-resource-rebuilder and qt-command-executor
+; (import net.asivery.CommandExecutor). The notion-bridge daemon must be
+; running (installed as a systemd service by the package).
+;
+; ANCHORS: the AFFECT blocks at the bottom target reMarkable OS 3.27.x
+; (resolved against a real device hashtab). For other OS versions,
+; re-anchor per packaging/vellum/README.md — the SLOT blocks are
+; firmware-independent.
+
+; ---------------------------------------------------------------------------
+; The full-screen overlay: pairing (QR + poll), target picker with pinned
+; recents + search, PDF/SVG toggle, page range, send progress.
+; All plain QtQuick primitives, e-ink friendly, no QtQuick.Controls.
+; ---------------------------------------------------------------------------
+SLOT rmNotionOverlay
+    INSERT {
+        Rectangle {
+            id: rmNotionOverlay
+
+            property string rmnDocUuid: ""
+            property string rmnDocName: ""
+            property string rmnMode: "checking"
+            property string rmnErrorText: ""
+            property string rmnWorkspaceName: ""
+            property string rmnDeviceCode: ""
+            property string rmnQrPath: ""
+            property string rmnSendFormat: "pdf"
+            // "embed" renders the file on the Notion page (a pdf or image
+            // block); "file" adds it as a download row.
+            property string rmnAttachAs: "embed"
+            property string rmnBlockUrl: ""
+            // One entry per connected Notion account, as returned by
+            // targets.list: {account_id, workspace, pages, error}.
+            property var rmnAccounts: []
+            // Connected accounts as reported by status: {id, workspace}.
+            property var rmnAccountList: []
+            property var rmnRecents: []
+            property var rmnSelectedTarget: null
+            property string rmnPendingAction: ""
+
+            // Inserted as a child of DocumentView's full-screen root, so
+            // filling the default parent already covers the screen. Do not
+            // reparent via Window.window (unavailable in this QML scope).
+            anchors.fill: parent
+            color: "white"
+            visible: false
+            z: 1000
+
+            CommandExecutor {
+                id: rmnExec
+            }
+
+            // Synchronous call into the daemon's CLI client mode. Returns
+            // {result} or {error}.
+            function rmnCall(method, params) {
+                var raw = rmnExec.executeCommand(
+                    "/home/root/.vellum/bin/notion-bridge",
+                    ["-call", method, "-params", JSON.stringify(params || {})])
+                // CommandExecutor.executeCommand returns a JSON envelope
+                // string: {"stdout": "...", "stderr": "..."}. Unwrap it, then
+                // parse the daemon's own JSON out of stdout. Tolerate an
+                // already-unwrapped map in case the extension changes shape.
+                var env = raw
+                if (typeof env === "string") {
+                    var trimmed = env.trim()
+                    if (!trimmed)
+                        return {error: "no response from notion-bridge — is the daemon running?"}
+                    try {
+                        env = JSON.parse(trimmed)
+                    } catch (e) {
+                        return {error: "bad response: " + trimmed}
+                    }
+                }
+                if (!env)
+                    return {error: "no response from notion-bridge — is the daemon running?"}
+                var out = ("" + (env.stdout || "")).trim()
+                console.warn("[rmn] call " + method + " out=<" + out + "> err=<" + env.stderr + ">");
+                if (!out) {
+                    var err = ("" + (env.stderr || "")).trim()
+                    return {error: err || "no response from notion-bridge — is the daemon running?"}
+                }
+                try {
+                    return JSON.parse(out)
+                } catch (e) {
+                    return {error: "bad response: " + out}
+                }
+            }
+
+            function rmnOpen(uuid, name, range) {
+                rmnDocUuid = uuid
+                rmnDocName = name || "Notebook"
+                rmnErrorText = ""
+                rmnBlockUrl = ""
+                rmnSelectedTarget = null
+                rmnPageRange.text = range || ""
+                console.warn("[rmn] overlay.rmnOpen uuid=" + uuid + " parent=" + parent
+                             + " w=" + width + " h=" + height);
+                rmnSearch.text = ""
+                visible = true
+                console.warn("[rmn] overlay visible=" + visible + " z=" + z);
+                // Defer the first bridge call one frame so the overlay
+                // paints before any synchronous work runs.
+                rmnDefer("refresh")
+            }
+
+            function rmnDismiss() {
+                rmnPollTimer.running = false
+                visible = false
+            }
+
+            function rmnDefer(action) {
+                rmnPendingAction = action
+                rmnDeferTimer.restart()
+            }
+
+            function rmnFail(message) {
+                rmnErrorText = "" + message
+                rmnMode = "error"
+            }
+
+            function rmnRefreshStatus() {
+                rmnMode = "checking"
+                var r = rmnCall("status", {})
+                if (r.error) { rmnFail(r.error); return }
+                rmnAccountList = r.result.accounts || []
+                if (r.result.authed) {
+                    rmnWorkspaceName = r.result.workspace || ""
+                    rmnMode = "pick"
+                    rmnLoadTargets("", false)
+                } else {
+                    rmnStartPairing()
+                }
+            }
+
+            // Pairing adds an account; it never replaces the connected
+            // ones, so this is also how "Add account" works.
+            function rmnStartPairing() {
+                rmnMode = "pair"
+                rmnDeviceCode = ""
+                rmnQrPath = ""
+                var r = rmnCall("pair.start", {})
+                if (r.error) { rmnFail(r.error); return }
+                rmnDeviceCode = r.result.device_code
+                rmnQrPath = r.result.qr_png_path
+                rmnPollTimer.running = true
+            }
+
+            function rmnPollPairing() {
+                var r = rmnCall("pair.poll", {device_code: rmnDeviceCode})
+                if (r.error) { rmnPollTimer.running = false; rmnFail(r.error); return }
+                if (r.result.state === "ok") {
+                    rmnPollTimer.running = false
+                    rmnMode = "pick"
+                    rmnLoadTargets("", false)
+                } else if (r.result.state === "expired") {
+                    rmnPollTimer.running = false
+                    rmnFail("Pairing code expired — try again.")
+                }
+            }
+
+            // Pull fresh pages. rmnResync also re-reads each workspace name
+            // from Notion first, for when one was renamed since pairing.
+            function rmnResync() {
+                rmnMode = "checking"
+                rmnDefer("resync")
+            }
+
+            function rmnLoadTargets(query, refresh) {
+                var r = rmnCall(refresh ? "targets.refresh" : "targets.list",
+                                {query: query})
+                if (r.error) { rmnFail(r.error); return }
+                rmnAccounts = r.result.accounts || []
+                rmnRecents = r.result.recent || []
+                console.warn("[rmn] targets accounts=" + rmnAccounts.length
+                             + " recents=" + rmnRecents.length
+                             + " listCount=" + rmnList.count
+                             + " listH=" + rmnList.height);
+                rmnMode = "pick"
+            }
+
+            function rmnDoSend() {
+                var r = rmnCall("send", {
+                    doc_uuid: rmnDocUuid,
+                    page_range: rmnPageRange.text,
+                    format: rmnSendFormat,
+                    target_page_id: rmnSelectedTarget.id,
+                    target_title: rmnSelectedTarget.title || "",
+                    target_icon: rmnSelectedTarget.icon || "",
+                    account_id: rmnSelectedTarget.accountId || "",
+                    attach_as: rmnAttachAs
+                })
+                if (r.error) { rmnFail(r.error); return }
+                rmnBlockUrl = r.result.block_url || ""
+                rmnMode = "done"
+            }
+
+            // Drop one connection. Removing the last one falls back to the
+            // pairing screen via rmnRefreshStatus.
+            function rmnRemoveAccount(accountId) {
+                rmnCall("logout", {account_id: accountId})
+                rmnSelectedTarget = null
+                rmnRefreshStatus()
+            }
+
+            function rmnShowAccounts() {
+                var r = rmnCall("status", {})
+                if (!r.error)
+                    rmnAccountList = r.result.accounts || []
+                rmnMode = "accounts"
+            }
+
+            // One-frame deferral so state changes paint before sync work.
+            Timer {
+                id: rmnDeferTimer
+                interval: 60
+                repeat: false
+                onTriggered: {
+                    var a = rmNotionOverlay.rmnPendingAction
+                    rmNotionOverlay.rmnPendingAction = ""
+                    if (a === "refresh") rmNotionOverlay.rmnRefreshStatus()
+                    else if (a === "send") rmNotionOverlay.rmnDoSend()
+                    else if (a === "search") rmNotionOverlay.rmnLoadTargets(rmnSearch.text, false)
+                    else if (a === "resync") rmNotionOverlay.rmnLoadTargets(rmnSearch.text, true)
+                }
+            }
+
+            Timer {
+                id: rmnPollTimer
+                interval: 3000
+                repeat: true
+                running: false
+                onTriggered: rmNotionOverlay.rmnPollPairing()
+            }
+
+            Rectangle {
+                id: rmnHeader
+                width: parent.width
+                height: 96
+                color: "white"
+                border.color: "black"
+                border.width: 2
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: 32
+                    // With several accounts connected the workspace lives on
+                    // each section header in the list, so the title stays
+                    // plain unless there is exactly one.
+                    text: "Send to Notion" + (rmNotionOverlay.rmnWorkspaceName
+                          ? "  ·  " + rmNotionOverlay.rmnWorkspaceName : "")
+                    font.pixelSize: 34
+                    font.bold: true
+                }
+                Text {
+                    id: rmnResyncLink
+                    visible: rmNotionOverlay.rmnMode === "pick"
+                    anchors.right: rmnAccountsLink.left
+                    anchors.rightMargin: 40
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Refresh"
+                    font.pixelSize: 24
+                    font.underline: true
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            rmnSearch.focus = false
+                            rmNotionOverlay.rmnResync()
+                        }
+                    }
+                }
+                Text {
+                    id: rmnAccountsLink
+                    visible: rmNotionOverlay.rmnMode === "pick"
+                             || rmNotionOverlay.rmnMode === "accounts"
+                    anchors.right: rmnClose.left
+                    anchors.rightMargin: 40
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: rmNotionOverlay.rmnMode === "accounts" ? "Done" : "Accounts"
+                    font.pixelSize: 24
+                    font.underline: true
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            if (rmNotionOverlay.rmnMode === "accounts")
+                                rmNotionOverlay.rmnDefer("refresh")
+                            else
+                                rmNotionOverlay.rmnShowAccounts()
+                        }
+                    }
+                }
+                Rectangle {
+                    id: rmnClose
+                    width: 96; height: 64
+                    anchors.right: parent.right
+                    anchors.rightMargin: 24
+                    anchors.verticalCenter: parent.verticalCenter
+                    border.color: "black"; border.width: 2
+                    Text { anchors.centerIn: parent; text: "X"; font.pixelSize: 30 }
+                    MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnDismiss() }
+                }
+            }
+
+            Text {
+                visible: rmNotionOverlay.rmnMode === "checking"
+                anchors.centerIn: parent
+                text: "Checking connection..."
+                font.pixelSize: 30
+            }
+
+            Column {
+                visible: rmNotionOverlay.rmnMode === "pair"
+                anchors.centerIn: parent
+                spacing: 28
+                width: 640
+
+                Text {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "Scan with your phone to connect a Notion workspace"
+                    font.pixelSize: 30
+                }
+                Image {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 512; height: 512
+                    cache: false
+                    source: rmNotionOverlay.rmnQrPath ? "file://" + rmNotionOverlay.rmnQrPath : ""
+                }
+                Text {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    text: rmNotionOverlay.rmnDeviceCode ? "Waiting for approval..." : "Requesting code..."
+                    font.pixelSize: 24
+                    color: "#444444"
+                }
+            }
+
+            Item {
+                visible: rmNotionOverlay.rmnMode === "accounts"
+                anchors.top: rmnHeader.bottom
+                anchors.bottom: parent.bottom
+                width: parent.width
+
+                Column {
+                    x: 32
+                    y: 24
+                    width: parent.width - 64
+                    spacing: 0
+
+                    Repeater {
+                        model: rmNotionOverlay.rmnAccountList
+
+                        delegate: Rectangle {
+                            width: parent.width
+                            height: 88
+                            color: "white"
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: 12
+                                width: parent.width - 220
+                                elide: Text.ElideRight
+                                text: modelData.workspace || "Notion"
+                                font.pixelSize: 28
+                            }
+                            Rectangle {
+                                width: 160; height: 60
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                border.color: "black"; border.width: 2
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "Remove"
+                                    font.pixelSize: 24
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: rmNotionOverlay.rmnRemoveAccount(modelData.id)
+                                }
+                            }
+                            Rectangle {
+                                width: parent.width; height: 1
+                                color: "#cccccc"
+                                anchors.bottom: parent.bottom
+                            }
+                        }
+                    }
+
+                    Item { width: 1; height: 32 }
+
+                    Rectangle {
+                        width: 320; height: 72
+                        color: "black"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Add account"
+                            font.pixelSize: 28
+                            color: "white"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: rmNotionOverlay.rmnStartPairing()
+                        }
+                    }
+
+                    Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: "Adding an account pairs another Notion workspace — "
+                              + "a personal one alongside work, say. Pages appear "
+                              + "grouped by workspace in the picker."
+                        font.pixelSize: 22
+                        color: "#777777"
+                        topPadding: 24
+                    }
+                }
+            }
+
+            Item {
+                visible: rmNotionOverlay.rmnMode === "pick"
+                anchors.top: rmnHeader.bottom
+                anchors.bottom: rmnFooter.top
+                width: parent.width
+
+                // Tapping empty space drops focus so the on-screen keyboard
+                // goes away; sits below the search box and list, so taps on
+                // those still reach them.
+                MouseArea {
+                    anchors.fill: parent
+                    z: -1
+                    onClicked: rmnSearch.focus = false
+                }
+
+                Rectangle {
+                    id: rmnSearchBox
+                    x: 32; y: 24
+                    width: parent.width - 64
+                    height: 72
+                    border.color: "black"; border.width: 2
+
+                    TextInput {
+                        id: rmnSearch
+                        anchors.fill: parent
+                        anchors.margins: 18
+                        font.pixelSize: 28
+                        clip: true
+                        onAccepted: {
+                            focus = false
+                            rmNotionOverlay.rmnDefer("search")
+                        }
+                    }
+                    Text {
+                        anchors.fill: rmnSearch
+                        text: "Search pages..."
+                        font.pixelSize: 28
+                        color: "#999999"
+                        visible: rmnSearch.text === "" && !rmnSearch.activeFocus
+                    }
+                }
+
+                ListView {
+                    id: rmnList
+                    anchors.top: rmnSearchBox.bottom
+                    anchors.topMargin: 16
+                    anchors.bottom: parent.bottom
+                    x: 32
+                    width: parent.width - 64
+                    clip: true
+
+                    model: {
+                        // A flat row list with section headers, so pages sit
+                        // under the workspace they belong to. Recents come
+                        // first and carry their own workspace label, since
+                        // the same page id can exist in two accounts.
+                        var rows = []
+                        var recents = rmNotionOverlay.rmnRecents
+                        if (recents.length > 0) {
+                            rows.push({kind: "header", label: "Recent"})
+                            for (var i = 0; i < recents.length; i++) {
+                                var r = recents[i]
+                                rows.push({kind: "page", id: r.id, title: r.title,
+                                           icon: r.icon, accountId: r.account_id,
+                                           depth: 0, note: r.workspace || ""})
+                            }
+                        }
+                        var accounts = rmNotionOverlay.rmnAccounts
+                        for (var a = 0; a < accounts.length; a++) {
+                            var acc = accounts[a]
+                            rows.push({kind: "header",
+                                       label: acc.workspace || "Notion"})
+                            if (acc.error) {
+                                rows.push({kind: "note", label: acc.error})
+                                continue
+                            }
+                            var pages = acc.pages || []
+                            if (pages.length === 0) {
+                                // Notion has no "whole workspace" grant: a
+                                // connection only sees pages the user picked,
+                                // so say how to widen it.
+                                rows.push({kind: "note", label: "No pages shared yet — re-add this account and pick a top-level page to include everything under it"})
+                                continue
+                            }
+                            for (var j = 0; j < pages.length; j++) {
+                                var pg = pages[j]
+                                rows.push({kind: "page", id: pg.id, title: pg.title,
+                                           icon: pg.icon, accountId: acc.account_id,
+                                           depth: pg.depth || 0, note: ""})
+                            }
+                        }
+                        return rows
+                    }
+
+                    delegate: Item {
+                        width: rmnList.width
+                        height: modelData.kind === "page" ? 76
+                                : modelData.kind === "header" ? 64 : 60
+
+                        property bool rmnIsSelected:
+                            modelData.kind === "page"
+                            && rmNotionOverlay.rmnSelectedTarget
+                            && rmNotionOverlay.rmnSelectedTarget.id === modelData.id
+                            && rmNotionOverlay.rmnSelectedTarget.accountId === modelData.accountId
+
+                        // Workspace section header.
+                        Rectangle {
+                            anchors.fill: parent
+                            visible: modelData.kind === "header"
+                            color: "#eeeeee"
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: 12
+                                width: parent.width - 24
+                                elide: Text.ElideRight
+                                text: modelData.label
+                                font.pixelSize: 24
+                                font.bold: true
+                                color: "#333333"
+                            }
+                        }
+
+                        // "no pages" / per-account error line.
+                        Text {
+                            visible: modelData.kind === "note"
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: 24
+                            width: parent.width - 48
+                            wrapMode: Text.WordWrap
+                            elide: Text.ElideRight
+                            text: modelData.label
+                            font.pixelSize: 22
+                            color: "#777777"
+                        }
+
+                        // Selectable page row.
+                        Rectangle {
+                            anchors.fill: parent
+                            visible: modelData.kind === "page"
+                            color: parent.rmnIsSelected ? "black" : "white"
+
+                            // Sub-pages are indented under their parent, the
+                            // way they nest in Notion.
+                            Rectangle {
+                                visible: modelData.depth > 0
+                                x: 12 + (modelData.depth - 1) * 36 + 10
+                                width: 2
+                                height: parent.height - 24
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: parent.parent.rmnIsSelected ? "#888888" : "#cccccc"
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: 12 + modelData.depth * 36
+                                width: parent.width - 24 - modelData.depth * 36
+                                elide: Text.ElideRight
+                                text: (modelData.icon ? modelData.icon + "  " : "")
+                                      + modelData.title
+                                      + (modelData.note ? "   -  " + modelData.note : "")
+                                font.pixelSize: 28
+                                color: parent.parent.rmnIsSelected ? "white" : "black"
+                            }
+                            Rectangle {
+                                width: parent.width; height: 1
+                                color: "#cccccc"
+                                anchors.bottom: parent.bottom
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    rmnSearch.focus = false
+                                    rmNotionOverlay.rmnSelectedTarget = {
+                                        id: modelData.id,
+                                        title: modelData.title,
+                                        icon: modelData.icon,
+                                        accountId: modelData.accountId
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                id: rmnFooter
+                visible: rmNotionOverlay.rmnMode === "pick"
+                width: parent.width
+                height: 196
+                anchors.bottom: parent.bottom
+                color: "white"
+                border.color: "black"; border.width: 2
+
+                Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: 32
+                    spacing: 16
+
+                    Row {
+                        spacing: 24
+
+                        // Render format.
+                        Row {
+                            spacing: 0
+                            Rectangle {
+                                width: 110; height: 64
+                                color: rmNotionOverlay.rmnSendFormat === "pdf" ? "black" : "white"
+                                border.color: "black"; border.width: 2
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "PDF"
+                                    font.pixelSize: 26
+                                    color: rmNotionOverlay.rmnSendFormat === "pdf" ? "white" : "black"
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnSendFormat = "pdf" }
+                            }
+                            Rectangle {
+                                width: 110; height: 64
+                                color: rmNotionOverlay.rmnSendFormat === "svg" ? "black" : "white"
+                                border.color: "black"; border.width: 2
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "SVG"
+                                    font.pixelSize: 26
+                                    color: rmNotionOverlay.rmnSendFormat === "svg" ? "white" : "black"
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnSendFormat = "svg" }
+                            }
+                        }
+
+                        // Whether the file renders on the Notion page or sits
+                        // there as a download row.
+                        Row {
+                            spacing: 0
+                            Rectangle {
+                                width: 150; height: 64
+                                color: rmNotionOverlay.rmnAttachAs === "embed" ? "black" : "white"
+                                border.color: "black"; border.width: 2
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "Embed"
+                                    font.pixelSize: 26
+                                    color: rmNotionOverlay.rmnAttachAs === "embed" ? "white" : "black"
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnAttachAs = "embed" }
+                            }
+                            Rectangle {
+                                width: 150; height: 64
+                                color: rmNotionOverlay.rmnAttachAs === "file" ? "black" : "white"
+                                border.color: "black"; border.width: 2
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "File"
+                                    font.pixelSize: 26
+                                    color: rmNotionOverlay.rmnAttachAs === "file" ? "white" : "black"
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnAttachAs = "file" }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 260; height: 64
+                        border.color: "black"; border.width: 2
+                        TextInput {
+                            id: rmnPageRange
+                            anchors.fill: parent
+                            anchors.margins: 14
+                            font.pixelSize: 26
+                            clip: true
+                        }
+                        Text {
+                            anchors.fill: rmnPageRange
+                            text: "Pages (e.g. 1-3)"
+                            font.pixelSize: 24
+                            color: "#999999"
+                            visible: rmnPageRange.text === "" && !rmnPageRange.activeFocus
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 180; height: 72
+                    anchors.right: parent.right
+                    anchors.rightMargin: 32
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: rmNotionOverlay.rmnSelectedTarget ? "black" : "#dddddd"
+                    Text { anchors.centerIn: parent; text: "Send"; font.pixelSize: 30; color: "white" }
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: !!rmNotionOverlay.rmnSelectedTarget
+                        onClicked: {
+                            rmNotionOverlay.rmnMode = "sending"
+                            rmNotionOverlay.rmnDefer("send")
+                        }
+                    }
+                }
+            }
+
+            Column {
+                visible: rmNotionOverlay.rmnMode === "sending"
+                         || rmNotionOverlay.rmnMode === "done"
+                         || rmNotionOverlay.rmnMode === "error"
+                anchors.centerIn: parent
+                spacing: 24
+                width: 700
+
+                Text {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: 32
+                    text: rmNotionOverlay.rmnMode === "sending"
+                          ? "Sending " + rmNotionOverlay.rmnDocName + "..."
+                          : rmNotionOverlay.rmnMode === "done" ? "Sent to Notion"
+                          : "Something went wrong"
+                }
+                Text {
+                    visible: rmNotionOverlay.rmnMode === "error"
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: 26
+                    color: "#444444"
+                    text: rmNotionOverlay.rmnErrorText
+                }
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 20
+                    visible: rmNotionOverlay.rmnMode !== "sending"
+
+                    Rectangle {
+                        visible: rmNotionOverlay.rmnMode === "error"
+                        width: 200; height: 72
+                        border.color: "black"; border.width: 2
+                        Text { anchors.centerIn: parent; text: "Try again"; font.pixelSize: 28 }
+                        MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnDefer("refresh") }
+                    }
+                    Rectangle {
+                        width: 200; height: 72
+                        color: "black"
+                        Text { anchors.centerIn: parent; text: "Close"; font.pixelSize: 28; color: "white" }
+                        MouseArea { anchors.fill: parent; onClicked: rmNotionOverlay.rmnDismiss() }
+                    }
+                }
+            }
+        }
+    }
+END SLOT
+
+; ---------------------------------------------------------------------------
+; Anchors for reMarkable OS 3.27.x (Paper Pure hashtab).
+; Entry point: the share menu in the notebook toolbar — the foldout with
+; "Present with Screen Share" / "Send by email" / "Convert and share".
+; Send to Notion lands right after "Send by email".
+; ---------------------------------------------------------------------------
+
+; The toolbar carries the signal so the share row can reach the document
+; view the same way the stock rows do (root.toolbar.<signal>()).
+AFFECT /qt/qml/xofm/libs/toolbar/qml/Toolbar.qml
+    TRAVERSE FocusScope#root
+        LOCATE BEFORE ALL
+        INSERT {
+            signal sendToNotionSelected
+        }
+    END TRAVERSE
+END AFFECT
+
+; shareMenuContent is the ColumnLayout that holds the share buttons; the
+; wildcard ?# finds it recursively. The row fires the toolbar signal by
+; piggybacking on the sibling Send-by-email button's own toolbar reference
+; (that button already uses root.toolbar internally), so no fragile toolbar
+; The share buttons live in a ColumnLayout assigned to the ToolbarTool's
+; foldoutContent property (objectName "shareMenuContent", no id). Reach it
+; via root's children, then insert after Send-by-email. root.toolbar is in
+; scope here (the sibling buttons use it), so the row fires the signal
+; directly.
+AFFECT /qt/qml/xofm/libs/toolbar/qml/ShareMenu.qml
+    TRAVERSE ?#root > ColumnLayout
+        LOCATE AFTER SendByEmailButton
+        INSERT {
+                Item {
+                    id: rmNotionShareRow
+                    Layout.fillWidth: true
+                    // Lines up with the stock rows either side of it: a
+                    // FoldoutItem is 112 tall and starts its content 32 in,
+                    // with a little padding of its own inside that.
+                    implicitHeight: 112
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: rmnRowTap.pressed ? "#e6e6e6" : "transparent"
+                    }
+                    // Notion's N mark, drawn from plain Rectangles: an
+                    // outlined page with the two stems and the diagonal.
+                    // Nothing to ship as an asset, and no dependency on the
+                    // SVG image plugin or QtQuick.Shapes being available.
+                    Item {
+                        id: rmNotionMark
+                        width: 40
+                        height: 40
+                        anchors.left: parent.left
+                        anchors.leftMargin: 35
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: "white"
+                            border.color: "black"
+                            border.width: 2
+                            radius: 4
+                        }
+                        // Left stem, full height of the glyph.
+                        Rectangle {
+                            x: 10; y: 9
+                            width: 5; height: 22
+                            color: "black"
+                        }
+                        // Right stem, lighter than the left one as in the mark.
+                        Rectangle {
+                            x: 26; y: 9
+                            width: 4; height: 22
+                            color: "black"
+                        }
+                        // Diagonal from the top of the left stem to the foot
+                        // of the right one: a vertical bar tilted to match
+                        // atan(16/22) ≈ 36 degrees, anticlockwise so it
+                        // leans the way the letter's stroke does.
+                        Rectangle {
+                            width: 5
+                            height: 29
+                            x: 20 - width / 2
+                            y: 20 - height / 2
+                            color: "black"
+                            rotation: -36
+                        }
+                    }
+                    Text {
+                        anchors.left: rmNotionMark.right
+                        anchors.leftMargin: 20
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Send to Notion"
+                        font.pixelSize: 28
+                    }
+                    MouseArea {
+                        id: rmnRowTap
+                        anchors.fill: parent
+                        onClicked: {
+                            console.warn("[rmn] row tapped; toolbar=" + root.toolbar);
+                            root.toolbar.sendToNotionSelected();
+                            console.warn("[rmn] signal emitted");
+                        }
+                    }
+                }
+            }
+        END TRAVERSE
+END AFFECT
+
+AFFECT /qml/device/view/documentview/DocumentView.qml
+    IMPORT net.asivery.CommandExecutor 1.0
+
+    TRAVERSE FocusScope#root
+        LOCATE AFTER ALL
+        INSERT SLOT rmNotionOverlay
+        INSERT {
+            function rmNotionOpenOverlay() {
+                console.warn("[rmn] rmNotionOpenOverlay; overlay=" + rmNotionOverlay);
+                var name = "Notebook";
+                try {
+                    var entry = Library.entryForId(document.id);
+                    if (entry && entry.visibleName) name = entry.visibleName;
+                } catch (e) {}
+                rmNotionOverlay.rmnOpen(document.id, name, "");
+            }
+        }
+
+        TRAVERSE Item#_uiContainer > Toolbar
+            LOCATE AFTER ALL
+            INSERT {
+                onSendToNotionSelected: {
+                    console.warn("[rmn] handler reached on Toolbar");
+                    root.rmNotionOpenOverlay();
+                }
+            }
+        END TRAVERSE
+    END TRAVERSE
+END AFFECT

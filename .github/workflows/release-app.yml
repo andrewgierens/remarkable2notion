@@ -1,0 +1,99 @@
+name: Release app
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "app/**"
+      - "packaging/**"
+      - ".github/workflows/release-app.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: release-app
+  cancel-in-progress: false
+
+# Least privilege by default; the release job widens it for itself.
+permissions:
+  contents: read
+
+jobs:
+  # Single source of truth for the version string.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=v0.1.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  # Gates everything. A failure here stops the release before anything ships.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: app/daemon/go.sum
+      - name: Vet and test daemon
+        run: go vet ./... && go test ./...
+        working-directory: app/daemon
+      - name: Validate QMD
+        run: ./app/qmd/scripts/validate.sh
+
+  # Cross-compile the daemon and assemble one installable tarball per device arch.
+  build-app:
+    needs: [version, verify]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - device: rm2     # rM1 / rM2 — armv7
+            goarch: arm
+            goarm: "7"
+          - device: rmpp    # aarch64 — Paper Pure / Paper Pro family
+            goarch: arm64
+            goarm: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: app/daemon/go.sum
+      - name: Build daemon
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ needs.version.outputs.version }}" \
+            -o ../../dist/${{ matrix.device }}/notion-bridge ./cmd/notion-bridge
+        working-directory: app/daemon
+      - name: Assemble package
+        run: ./app/package/build.sh ${{ matrix.device }} ${{ needs.version.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rm-notion-${{ matrix.device }}
+          path: dist/rm-notion-${{ matrix.device }}-*.tar.gz
+          if-no-files-found: error
+
+  # Create the release and attach both device packages.
+  release:
+    needs: [version, build-app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the tag and release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          name: ${{ needs.version.outputs.version }}
+          body: Automated release ${{ needs.version.outputs.version }}.
+          files: artifacts/*.tar.gz

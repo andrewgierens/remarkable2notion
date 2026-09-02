@@ -1,0 +1,14 @@
+[Unit]
+Description=rm-notion bridge daemon
+After=network-online.target xochitl.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/home/root/.vellum/bin/notion-bridge
+Restart=on-failure
+RestartSec=5
+# Broker override, if self-hosting:
+# Environment=NOTION_BRIDGE_BROKER=https://broker.example
+
+[Install]
+WantedBy=multi-user.target

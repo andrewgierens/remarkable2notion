@@ -1,0 +1,83 @@
+# Vellum package for rm-notion. Build and sideload (see packaging/vellum/README.md):
+#
+#   git clone https://github.com/vellum-dev/vellum
+#   cp -r packaging/vellum/rm-notion vellum/packages/
+#   cd vellum && ./scripts/build-package.sh rm-notion aarch64   # Paper Pro / Move
+#             or ./scripts/build-package.sh rm-notion armv7     # rM1 / rM2
+#
+# pkgver tracks a published GitHub release. Refresh it and the checksums with
+# packaging/vellum/update-velbuild.sh <version> after cutting one.
+maintainer="Andrew Gierens <apgierens@gmail.com>"
+status="maintained"
+pkgname=rm-notion
+pkgver=0.1.5
+pkgrel=0
+upstream_author="andrewgierens"
+category=utility
+pkgdesc="Send a reMarkable drawing to a Notion page as SVG or PDF"
+url="https://github.com/andrewgierens/remarkable2notion"
+arch="aarch64 armv7"
+license="MIT"
+# qt-command-executor is not optional: without it the QML import fails and
+# xochitl crash-loops. The UI patch anchors to 3.27's QML component names, so
+# it is pinned to that firmware until re-anchored.
+depends="xovi qt-resource-rebuilder qt-command-executor remarkable-os>=3.27 remarkable-os<3.28"
+readmeurl="https://raw.githubusercontent.com/$upstream_author/remarkable2notion/v$pkgver/README.md"
+source="
+rm-notion-rm2-v$pkgver.tar.gz::https://github.com/$upstream_author/remarkable2notion/releases/download/v$pkgver/rm-notion-rm2-v$pkgver.tar.gz
+rm-notion-rmpp-v$pkgver.tar.gz::https://github.com/$upstream_author/remarkable2notion/releases/download/v$pkgver/rm-notion-rmpp-v$pkgver.tar.gz
+"
+# The Go binary is already stripped at link time (-s -w); running strip(1)
+# over it again risks breaking the runtime's section layout.
+options='!strip'
+
+package() {
+	set -e
+	case "$CARCH" in
+	aarch64) _device=rmpp ;;
+	armv7) _device=rm2 ;;
+	*)
+		echo "Invalid CARCH: $CARCH"
+		exit 1
+		;;
+	esac
+	_dir="$srcdir/rm-notion-$_device-v$pkgver"
+
+	install -Dm755 "$_dir/bin/notion-bridge" \
+		"$pkgdir"/home/root/.vellum/bin/notion-bridge
+
+	install -Dm644 "$_dir/qmd/send-to-notion.qmd" \
+		"$pkgdir"/home/root/xovi/exthome/qt-resource-rebuilder/send-to-notion.qmd
+
+	# /etc is restored on every boot on these devices — xovi mounts its own
+	# systemd drop-ins on a tmpfs for the same reason — so the unit of record
+	# lives here and an xovi post-start hook reinstalls it on every start.
+	install -Dm644 "$_dir/notion-bridge.service" \
+		"$pkgdir"/home/root/.vellum/share/rm-notion/notion-bridge.service
+	install -Dm755 "$_dir/10-notion-bridge.sh" \
+		"$pkgdir"/home/root/xovi/scripts/post-start/10-notion-bridge.sh
+
+	install -Dm644 "$_dir/LICENSE" \
+		"$pkgdir/home/root/.vellum/licenses/$pkgname/LICENSE"
+	echo "$url" > "$pkgdir/home/root/.vellum/licenses/$pkgname/SOURCES"
+}
+
+predeinstall() {
+	# The daemon is started by the xovi hook rather than by vellum, so stop it
+	# here; the hook goes away with the package.
+	systemctl disable --now notion-bridge.service 2>/dev/null || true
+	rm -f /etc/systemd/system/notion-bridge.service
+	systemctl daemon-reload 2>/dev/null || true
+
+	if [ "$VELLUM_PURGE" = "1" ]; then
+		rm -rf /home/root/.config/notion-bridge
+	else
+		echo "Note: /home/root/.config/notion-bridge preserved (Notion tokens)"
+		echo "      Use 'vellum purge rm-notion' to remove everything"
+	fi
+}
+
+sha512sums="
+74bf2e74b7b21055c7773c0bdaa9529184d79bc55390c307c91529785ed61b0cf84bb32403dd2401ac6386a8edbf5e949ee1991d0aa804aebdfe2246fe039487  rm-notion-rm2-v0.1.5.tar.gz
+2fcf1634792701d6b6f508f29346c66dc761fc73b0872ad8029b2376af8203db68339ce196aa190e7bbf529442ef49729a096905fe60c12aa788e6a89ef0fdfc  rm-notion-rmpp-v0.1.5.tar.gz
+"
