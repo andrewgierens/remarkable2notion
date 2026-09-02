@@ -39,6 +39,21 @@ The installer uses the same paths as the Vellum package
 (`/home/root/.vellum/bin`, `/home/root/xovi/exthome/qt-resource-rebuilder/`),
 so a later proper package install upgrades over it cleanly.
 
+## Validating the VELBUILD
+
+Before submitting to the Vellum index, run the linters their CI runs:
+
+```sh
+packaging/vellum/validate.sh
+```
+
+It checks that `pkgver` still agrees with `source=` and `sha512sums` (they
+have drifted before), then clones vellum-dev/vellum and runs
+`scripts/lint-packages.sh` against a copy of our package. On x86_64 Linux
+with docker or podman it also installs `vbuild` and runs `apkbuild-lint`;
+elsewhere that leg is skipped, since vbuild is published as an x86_64-only
+binary. CI runs it with `STRICT=1`, which makes that skip a failure.
+
 ## Route B — build the .apk and install with `vellum add`
 
 Needs Docker or Podman on your desktop, and a GitHub release to fetch

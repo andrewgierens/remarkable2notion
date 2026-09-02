@@ -1,0 +1,31 @@
+name: Validate packaging
+
+# The Vellum package is submitted to vellum-dev/vellum as a PR, where their CI
+# lints it. Run the same linters here so a broken VELBUILD is caught before the
+# submission rather than in their review queue.
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/validate-packaging.yml"
+  push:
+    branches: [master]
+    paths:
+      - "packaging/**"
+      - ".github/workflows/validate-packaging.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  velbuild:
+    runs-on: ubuntu-latest   # x86_64 + docker, which vbuild requires
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint VELBUILD
+        # STRICT=1 turns "vbuild unavailable" into a failure, so the
+        # apkbuild-lint leg can never be silently skipped on a runner.
+        env:
+          STRICT: "1"
+        run: ./packaging/vellum/validate.sh
