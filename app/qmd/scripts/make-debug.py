@@ -26,10 +26,8 @@ TRACES = [
         '                console.warn("[rmn] call " + method + " out=<" + out + "> err=<" + env.stderr + ">");\n',
     ),
     (
-        '                rmnAccounts = r.result.accounts || []\n'
-        '                rmnRecents = r.result.recent || []\n',
+        '                rmnAccounts = r.result.accounts || []\n',
         '                console.warn("[rmn] targets accounts=" + rmnAccounts.length\n'
-        '                             + " recents=" + rmnRecents.length\n'
         '                             + " listCount=" + rmnList.count\n'
         '                             + " listH=" + rmnList.height);\n',
     ),

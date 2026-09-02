@@ -37,7 +37,7 @@ const defaultBroker = "https://rmk2notion.tonytheprwn.dev"
 func main() {
 	var (
 		socketPath  = flag.String("socket", "/run/notion-bridge.sock", "unix socket path")
-		configDir   = flag.String("config-dir", defaultConfigDir(), "state directory (token, recents, QR)")
+		configDir   = flag.String("config-dir", defaultConfigDir(), "state directory (token, QR)")
 		dataDir     = flag.String("data-dir", xochitl.DefaultDir, "xochitl notebook store")
 		brokerURL   = flag.String("broker", envOr("NOTION_BRIDGE_BROKER", defaultBroker), "pairing broker base URL")
 		call        = flag.String("call", "", "client mode: method to call on the running daemon")

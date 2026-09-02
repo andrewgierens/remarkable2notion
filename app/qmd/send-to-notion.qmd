@@ -10,8 +10,8 @@
 ; firmware-independent.
 
 ; ---------------------------------------------------------------------------
-; The full-screen overlay: pairing (QR + poll), target picker with pinned
-; recents + search, PDF/SVG toggle, page range, send progress.
+; The full-screen overlay: pairing (QR + poll), target picker with search,
+; PDF/SVG toggle, page range, send progress.
 ; All plain QtQuick primitives, e-ink friendly, no QtQuick.Controls.
 ; ---------------------------------------------------------------------------
 SLOT rmNotionOverlay
@@ -23,7 +23,6 @@ SLOT rmNotionOverlay
             property string rmnDocName: ""
             property string rmnMode: "checking"
             property string rmnErrorText: ""
-            property string rmnWorkspaceName: ""
             property string rmnDeviceCode: ""
             property string rmnQrPath: ""
             property string rmnSendFormat: "pdf"
@@ -36,7 +35,6 @@ SLOT rmNotionOverlay
             property var rmnAccounts: []
             // Connected accounts as reported by status: {id, workspace}.
             property var rmnAccountList: []
-            property var rmnRecents: []
             property var rmnSelectedTarget: null
             property string rmnPendingAction: ""
 
@@ -122,7 +120,6 @@ SLOT rmNotionOverlay
                 if (r.error) { rmnFail(r.error); return }
                 rmnAccountList = r.result.accounts || []
                 if (r.result.authed) {
-                    rmnWorkspaceName = r.result.workspace || ""
                     rmnMode = "pick"
                     rmnLoadTargets("", false)
                 } else {
@@ -168,7 +165,6 @@ SLOT rmNotionOverlay
                                 {query: query})
                 if (r.error) { rmnFail(r.error); return }
                 rmnAccounts = r.result.accounts || []
-                rmnRecents = r.result.recent || []
                 rmnMode = "pick"
             }
 
@@ -178,8 +174,6 @@ SLOT rmNotionOverlay
                     page_range: rmnPageRange.text,
                     format: rmnSendFormat,
                     target_page_id: rmnSelectedTarget.id,
-                    target_title: rmnSelectedTarget.title || "",
-                    target_icon: rmnSelectedTarget.icon || "",
                     account_id: rmnSelectedTarget.accountId || "",
                     attach_as: rmnAttachAs
                 })
@@ -237,11 +231,10 @@ SLOT rmNotionOverlay
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     x: 32
-                    // With several accounts connected the workspace lives on
-                    // each section header in the list, so the title stays
-                    // plain unless there is exactly one.
-                    text: "Send to Notion" + (rmNotionOverlay.rmnWorkspaceName
-                          ? "  ·  " + rmNotionOverlay.rmnWorkspaceName : "")
+                    // No workspace here: the picker groups pages under a
+                    // section header per account, which is where the
+                    // workspace belongs once more than one is connected.
+                    text: "Send to Notion"
                     font.pixelSize: 34
                     font.bold: true
                 }
@@ -464,20 +457,8 @@ SLOT rmNotionOverlay
 
                     model: {
                         // A flat row list with section headers, so pages sit
-                        // under the workspace they belong to. Recents come
-                        // first and carry their own workspace label, since
-                        // the same page id can exist in two accounts.
+                        // under the workspace they belong to.
                         var rows = []
-                        var recents = rmNotionOverlay.rmnRecents
-                        if (recents.length > 0) {
-                            rows.push({kind: "header", label: "Recent"})
-                            for (var i = 0; i < recents.length; i++) {
-                                var r = recents[i]
-                                rows.push({kind: "page", id: r.id, title: r.title,
-                                           icon: r.icon, accountId: r.account_id,
-                                           depth: 0, note: r.workspace || ""})
-                            }
-                        }
                         var accounts = rmNotionOverlay.rmnAccounts
                         for (var a = 0; a < accounts.length; a++) {
                             var acc = accounts[a]
