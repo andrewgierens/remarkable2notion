@@ -68,16 +68,23 @@ notion-bridge -call pair.start      # → QR PNG path + verification URL
 ```
 
 If the daemon answers but nothing shows in xochitl's menu, the qmd anchors
-need re-anchoring for your firmware — that's expected on unpinned firmware
-(plan risk #3) and only touches `send-to-notion.qmd`.
+need re-anchoring for your firmware — expected on untested firmware, since
+QMD patches target specific xochitl QML — and only touches
+`send-to-notion.qmd`.
 
 ## Anchoring the UI patch to your firmware
 
 `send-to-notion.qmd` is written in [QMLDiff](https://github.com/asivery/qmldiff)
-with the UI inlined in SLOT blocks (firmware-independent) and two `AFFECT`
-anchor blocks that must target your firmware's actual QML (xochitl's
+with the UI inlined in SLOT blocks (firmware-independent) and three
+`AFFECT` anchor blocks that must target your firmware's actual QML (xochitl's
 component names change between OS versions and are distributed only in
-hashed form by community mods).
+hashed form by community mods):
+
+- `Toolbar.qml` (`FocusScope#root`) — adds the `sendToNotionSelected` signal;
+- `ShareMenu.qml` — the menu row, into the `ColumnLayout` bound to
+  `ToolbarTool`'s `foldoutContent`;
+- `DocumentView.qml` (`FocusScope#root`) — the overlay SLOT plus the
+  `onSendToNotionSelected` handler on `Item#_uiContainer > Toolbar`.
 
 To resolve the anchors:
 
@@ -91,7 +98,7 @@ To resolve the anchors:
    - `qmldiff hash-diffs <hashtab> <some-community-diff.qmd> -r` unhashes
      an existing mod (e.g. from rm-hacks-qmd or xovi-qmd-extensions for
      your OS version) to reveal the menu components it anchors to.
-3. Rewrite the two `AFFECT` blocks in `send-to-notion.qmd` against those
+3. Rewrite the `AFFECT` blocks in `send-to-notion.qmd` against those
    names, drop the file into
    `/home/root/xovi/exthome/qt-resource-rebuilder/`, and re-run
    `/home/root/xovi/start`. Iterate until the entry shows up —
@@ -100,6 +107,51 @@ To resolve the anchors:
 
    Note `qmldiff hash-diffs` rewrites the file **in place**: hash a copy in
    `app/qmd/hashed/<osver>/`, never the plain source.
+
+## Iterating on the UI patch
+
+Validate before every deploy — it catches diff-level syntax errors that on
+device surface only as `[qmldiff]: Failed to load file ...: Error while
+parsing`:
+
+```sh
+QMLDIFF=/path/to/qmldiff app/qmd/scripts/validate.sh
+```
+
+Then push the hashed build and restart via `/home/root/xovi/start` (see
+*Boot behaviour* below for why not `systemctl restart xochitl`). Run it
+**detached** — the restart drops the SSH session.
+
+```sh
+scp app/qmd/hashed/3.27/send-to-notion.qmd \
+    root@<device>:/home/root/xovi/exthome/qt-resource-rebuilder/sendtonotion.qmd
+ssh root@<device> 'setsid nohup /home/root/xovi/start >/tmp/xovi-start.log 2>&1 </dev/null &'
+# ~40s, then:
+ssh root@<device> 'journalctl -u xochitl -b --no-pager | grep -a qmldiff | tail'
+```
+
+Keep **exactly one** rm-notion .qmd in the patch dir at a time. If any diff
+fails to apply to a file, qt-resource-rebuilder discards *all* edits to that
+file — a stale copy alongside the new one silently reverts both.
+
+### Debug build
+
+`app/qmd/send-to-notion-debug.qmd` is generated from the plain source by
+`app/qmd/scripts/make-debug.py` (regenerate after every source change). It
+adds `console.warn("[rmn] ...")` traces at every link in the chain. Hash and
+install it *alone*, then:
+
+```sh
+journalctl -u xochitl -b --no-pager | grep -a '\[rmn\]'
+```
+
+Also grep for plain QML errors — a thrown exception aborts the rest of a
+function silently, which is what hid two of the three bugs in the original
+bring-up:
+
+```sh
+journalctl -u xochitl -b --no-pager | grep -aiE 'TypeError|ReferenceError|Error:'
+```
 
 ## Boot behaviour: /etc does not persist
 
