@@ -215,7 +215,7 @@ func (b *Bridge) handleTargetsList(params json.RawMessage) (any, error) {
 		return nil, firstErr
 	}
 
-	return map[string]any{"accounts": groups, "recent": b.recentsFor(accounts)}, nil
+	return map[string]any{"accounts": groups}, nil
 }
 
 // handleTargetsRefresh re-reads each connection's workspace name from Notion
@@ -316,52 +316,12 @@ func arrangePages(c context.Context, client *notion.Client, pages []notion.Page)
 	return out
 }
 
-// recentsFor returns the recents the picker can actually use. Entries stored
-// before multi-account support carry no account id: adopt them when exactly
-// one account is connected, and drop them otherwise rather than offering a
-// row whose target workspace is unknowable.
-func (b *Bridge) recentsFor(accounts []store.Account) []store.Recent {
-	recents := b.Store.Recents()
-	out := make([]store.Recent, 0, len(recents))
-	known := make(map[string]store.Account, len(accounts))
-	for _, a := range accounts {
-		known[a.ID] = a
-	}
-	// Adopting a legacy entry can collide with a newer one for the same page,
-	// so drop repeats — the list is newest first, and the first win keeps it
-	// in the right place.
-	seen := make(map[string]bool, len(recents))
-	for _, r := range recents {
-		if r.AccountID == "" {
-			if len(accounts) != 1 {
-				continue
-			}
-			r.AccountID = accounts[0].ID
-		}
-		a, ok := known[r.AccountID]
-		if !ok {
-			// The account was removed or revoked since.
-			continue
-		}
-		key := r.AccountID + "|" + r.ID
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		r.Workspace = a.Workspace
-		out = append(out, r)
-	}
-	return out
-}
-
 // sendRequest is the wire shape of the send method.
 type sendRequest struct {
 	DocUUID      string `json:"doc_uuid"`
 	PageRange    string `json:"page_range"`
 	Format       string `json:"format"` // "svg" | "pdf"
 	TargetPageID string `json:"target_page_id"`
-	TargetTitle  string `json:"target_title"` // optional, for the recents cache
-	TargetIcon   string `json:"target_icon"`
 	AccountID    string `json:"account_id"` // optional when only one is connected
 	AttachAs     string `json:"attach_as"`  // "embed" (default) | "file"
 }
@@ -410,13 +370,6 @@ func (b *Bridge) handleSend(params json.RawMessage) (any, error) {
 		return nil, b.dropTokenOn401(account.ID, err)
 	}
 
-	b.Store.AddRecent(store.Recent{
-		ID:        req.TargetPageID,
-		Title:     req.TargetTitle,
-		Icon:      req.TargetIcon,
-		AccountID: account.ID,
-		Workspace: account.Workspace,
-	})
 	return map[string]any{"ok": true, "block_url": blockURL}, nil
 }
 

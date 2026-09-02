@@ -270,7 +270,7 @@ func TestFullPairAndSendFlow(t *testing.T) {
 		t.Fatalf("paired status = %v", res)
 	}
 
-	// Targets now come from search plus (empty) recents.
+	// Targets now come from search.
 	res, errMsg = e.call(t, "targets.list", map[string]string{"query": "in"})
 	if errMsg != "" {
 		t.Fatal(errMsg)
@@ -318,18 +318,6 @@ func TestFullPairAndSendFlow(t *testing.T) {
 	}
 	if len(e.notion.uploads) != 2 {
 		t.Fatalf("expected a second upload, got %d", len(e.notion.uploads))
-	}
-
-	// The target landed in recents and is served back by targets.list.
-	res, _ = e.call(t, "targets.list", nil)
-	recents := res["recent"].([]any)
-	if len(recents) != 1 || recents[0].(map[string]any)["id"] != "aaaaaaaa-0000-4000-8000-000000000001" {
-		t.Fatalf("recents = %v", recents)
-	}
-	// A recent has to remember which workspace it belongs to, or sending to
-	// it again would go to whichever account happened to be first.
-	if recents[0].(map[string]any)["workspace"] != "Acme" {
-		t.Errorf("recent lost its workspace: %v", recents[0])
 	}
 
 	// Logout drops the token.
@@ -406,13 +394,10 @@ func TestSendNeedsAccountID(t *testing.T) {
 
 	res, errMsg := e.call(t, "send", map[string]string{
 		"doc_uuid": "doc1", "format": "pdf", "target_page_id": "aaaaaaaa-0000-4000-8000-000000000001",
-		"target_title": "Inbox", "account_id": home.ID,
+		"account_id": home.ID,
 	})
 	if errMsg != "" || res["ok"] != true {
 		t.Fatalf("named send = %v / %s", res, errMsg)
-	}
-	if got := e.bridge.Store.Recents(); len(got) != 1 || got[0].Workspace != "Home" {
-		t.Errorf("recent should record the named account: %+v", got)
 	}
 }
 
@@ -459,34 +444,6 @@ func TestSendValidation(t *testing.T) {
 	_, errMsg = e.call(t, "send", map[string]string{"doc_uuid": "missing", "format": "svg", "target_page_id": "aaaaaaaa-0000-4000-8000-000000000001"})
 	if errMsg == "" {
 		t.Error("missing document must error")
-	}
-}
-
-// Recents written before multi-account support have no account id. With one
-// account they should still work; with two, the target workspace is
-// unknowable, so they must not be offered at all.
-func TestLegacyRecents(t *testing.T) {
-	e := setup(t)
-	e.bridge.Store.AddRecent(store.Recent{ID: "pg-old", Title: "Old"})
-	acme, _ := e.bridge.Store.AddAccount("tok-a", "Acme")
-
-	res, errMsg := e.call(t, "targets.list", nil)
-	if errMsg != "" {
-		t.Fatal(errMsg)
-	}
-	recents := res["recent"].([]any)
-	if len(recents) != 1 {
-		t.Fatalf("recents = %v, want the legacy entry adopted", recents)
-	}
-	got := recents[0].(map[string]any)
-	if got["account_id"] != acme.ID || got["workspace"] != "Acme" {
-		t.Errorf("legacy recent not adopted: %v", got)
-	}
-
-	e.bridge.Store.AddAccount("tok-b", "Home")
-	res, _ = e.call(t, "targets.list", nil)
-	if recents := res["recent"].([]any); len(recents) != 0 {
-		t.Errorf("ambiguous legacy recent should be hidden, got %v", recents)
 	}
 }
 
@@ -604,26 +561,5 @@ func TestArrangePagesUsesParentOrder(t *testing.T) {
 	want := []string{"bbbbbbbb-0000-4000-8000-000000000000", "cccccccc-0000-4000-8000-00000000000f", "cccccccc-0000-4000-8000-00000000000a"}
 	if len(ids) != 3 || ids[0] != want[0] || ids[1] != want[1] || ids[2] != want[2] {
 		t.Errorf("ids = %v, want %v", ids, want)
-	}
-}
-
-// A recents entry written before account ids, plus a newer one for the same
-// page, must not show up twice once the legacy one is adopted.
-func TestRecentsDeduplicatesAfterAdoption(t *testing.T) {
-	e := setup(t)
-	acc, _ := e.bridge.Store.AddAccount("tok-a", "Acme")
-	e.bridge.Store.AddRecent(store.Recent{ID: "aaaaaaaa-0000-4000-8000-000000000001", Title: "Inbox"})
-	e.bridge.Store.AddRecent(store.Recent{ID: "aaaaaaaa-0000-4000-8000-000000000001", Title: "Inbox", AccountID: acc.ID, Workspace: "Acme"})
-
-	res, errMsg := e.call(t, "targets.list", nil)
-	if errMsg != "" {
-		t.Fatal(errMsg)
-	}
-	recents := res["recent"].([]any)
-	if len(recents) != 1 {
-		t.Fatalf("recents = %v, want one entry for the page", recents)
-	}
-	if got := recents[0].(map[string]any); got["account_id"] != acc.ID {
-		t.Errorf("recent = %v", got)
 	}
 }

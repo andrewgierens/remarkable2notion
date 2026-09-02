@@ -1,6 +1,5 @@
 // Package store persists the daemon's small local state: the connected
-// Notion accounts and their access tokens (mode 0600), and the
-// recent-targets cache.
+// Notion accounts and their access tokens (mode 0600).
 package store
 
 import (
@@ -15,20 +14,6 @@ import (
 	"sync"
 	"time"
 )
-
-// maxRecents caps the recent-targets cache.
-const maxRecents = 10
-
-// Recent is one recently used target page. AccountID says which connected
-// account the page belongs to — the same page id can exist in more than one
-// workspace, and sending needs the right token.
-type Recent struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Icon      string `json:"icon"`
-	AccountID string `json:"account_id"`
-	Workspace string `json:"workspace"`
-}
 
 // Account is one connected Notion workspace.
 type Account struct {
@@ -58,7 +43,11 @@ func New(dir string) (*Store, error) {
 	return &Store{dir: dir}, nil
 }
 
-func (s *Store) tokenPath() string     { return filepath.Join(s.dir, "token") }
+func (s *Store) tokenPath() string { return filepath.Join(s.dir, "token") }
+
+// recentsPath is the retired recent-targets cache. Nothing writes it any
+// more; it is still named here so an upgraded device stops carrying page
+// titles around in a file nothing reads.
 func (s *Store) recentsPath() string   { return filepath.Join(s.dir, "recents.json") }
 func (s *Store) workspacePath() string { return filepath.Join(s.dir, "workspace") }
 func (s *Store) accountsPath() string  { return filepath.Join(s.dir, "accounts.json") }
@@ -191,7 +180,7 @@ func (s *Store) SetWorkspace(accountID, workspace string) error {
 	return nil
 }
 
-// RemoveAccount forgets one connection, along with its recents.
+// RemoveAccount forgets one connection.
 func (s *Store) RemoveAccount(accountID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -202,13 +191,11 @@ func (s *Store) RemoveAccount(accountID string) error {
 			kept = append(kept, r)
 		}
 	}
-	if err := s.saveAccounts(kept); err != nil {
-		return err
-	}
-	return s.pruneRecentsLocked(func(r Recent) bool { return r.AccountID != accountID })
+	return s.saveAccounts(kept)
 }
 
-// RemoveAllAccounts forgets every connection and the recents cache.
+// RemoveAllAccounts forgets every connection, and sweeps up the retired
+// recents cache if this device still has one.
 func (s *Store) RemoveAllAccounts() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,78 +205,6 @@ func (s *Store) RemoveAllAccounts() error {
 		}
 	}
 	return nil
-}
-
-// Recents returns the cached recent targets, most recent first.
-func (s *Store) Recents() []Recent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b, err := os.ReadFile(s.recentsPath())
-	if err != nil {
-		return nil
-	}
-	var r []Recent
-	if json.Unmarshal(b, &r) != nil {
-		return nil
-	}
-	return r
-}
-
-// AddRecent puts a target at the head of the recents list, deduplicated and
-// capped at maxRecents.
-func (s *Store) AddRecent(r Recent) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var current []Recent
-	if b, err := os.ReadFile(s.recentsPath()); err == nil {
-		json.Unmarshal(b, &current)
-	}
-	out := []Recent{r}
-	for _, c := range current {
-		// The same page id can exist in two connected workspaces, so a
-		// recent is identified by account and page together.
-		if (c.ID != r.ID || c.AccountID != r.AccountID) && len(out) < maxRecents {
-			out = append(out, c)
-		}
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(s.recentsPath(), b, 0o600)
-}
-
-// pruneRecentsLocked keeps only the recents satisfying keep. Callers must
-// hold s.mu.
-func (s *Store) pruneRecentsLocked(keep func(Recent) bool) error {
-	b, err := os.ReadFile(s.recentsPath())
-	if err != nil {
-		return nil
-	}
-	var current []Recent
-	if json.Unmarshal(b, &current) != nil {
-		return nil
-	}
-	out := current[:0:0]
-	for _, r := range current {
-		if keep(r) {
-			out = append(out, r)
-		}
-	}
-	if len(out) == len(current) {
-		return nil
-	}
-	if len(out) == 0 {
-		if err := os.Remove(s.recentsPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	nb, err := json.Marshal(out)
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(s.recentsPath(), nb, 0o600)
 }
 
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {

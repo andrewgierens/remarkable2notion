@@ -1,7 +1,6 @@
 package store
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,72 +113,22 @@ func TestMigratesLegacySingleToken(t *testing.T) {
 	}
 }
 
-func TestRemoveAccountDropsItsRecents(t *testing.T) {
-	s, err := New(t.TempDir())
+// recents.json is retired, but a device upgrading from a version that wrote
+// one should not keep page titles in a file nothing reads.
+func TestRemoveAllAccountsSweepsRetiredRecents(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.AddRecent(Recent{ID: "p1", Title: "Work page", AccountID: "acc-work"})
-	s.AddRecent(Recent{ID: "p2", Title: "Home page", AccountID: "acc-home"})
-	if err := s.RemoveAccount("acc-work"); err != nil {
+	legacy := filepath.Join(dir, "recents.json")
+	if err := os.WriteFile(legacy, []byte(`[{"id":"p1","title":"Work page"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := s.Recents()
-	if len(got) != 1 || got[0].ID != "p2" {
-		t.Fatalf("recents after removal = %+v, want only the other account's", got)
-	}
-}
-
-// The same page id in two workspaces is two different targets.
-func TestRecentsDedupIsPerAccount(t *testing.T) {
-	s, err := New(t.TempDir())
-	if err != nil {
+	if err := s.RemoveAllAccounts(); err != nil {
 		t.Fatal(err)
 	}
-	s.AddRecent(Recent{ID: "shared", AccountID: "a"})
-	s.AddRecent(Recent{ID: "shared", AccountID: "b"})
-	if got := s.Recents(); len(got) != 2 {
-		t.Fatalf("recents = %+v, want both accounts' entries", got)
-	}
-	s.AddRecent(Recent{ID: "shared", AccountID: "a"})
-	if got := s.Recents(); len(got) != 2 {
-		t.Fatalf("re-adding the same target should dedup, got %+v", got)
-	}
-}
-
-func TestRecentsCapAndDedup(t *testing.T) {
-	s, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 15; i++ {
-		if err := s.AddRecent(Recent{ID: fmt.Sprintf("p%d", i), Title: fmt.Sprintf("Page %d", i)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	r := s.Recents()
-	if len(r) != 10 {
-		t.Fatalf("recents = %d, want cap of 10", len(r))
-	}
-	if r[0].ID != "p14" {
-		t.Errorf("most recent first, got %s", r[0].ID)
-	}
-
-	// Re-adding an existing target moves it to the head without duplicating.
-	if err := s.AddRecent(Recent{ID: "p10", Title: "Page 10"}); err != nil {
-		t.Fatal(err)
-	}
-	r = s.Recents()
-	if r[0].ID != "p10" || len(r) != 10 {
-		t.Errorf("dedup failed: head=%s len=%d", r[0].ID, len(r))
-	}
-	count := 0
-	for _, x := range r {
-		if x.ID == "p10" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("p10 appears %d times", count)
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("retired recents.json should be removed, stat err = %v", err)
 	}
 }
