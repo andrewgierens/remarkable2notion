@@ -61,12 +61,15 @@ jobs:
         run: |
           cargo install --locked --git https://github.com/asivery/qmldiff \
             --rev 25681c3cc7addb93fdbb41ceac1f1bdce8b2625d
-      # Without QMLDIFF set, validate.sh only does structural checks; with it,
-      # the diffs are actually applied to the mock QML tree in app/qmd/testdata.
+      # validate.sh degrades to structural-only checks when it cannot find a
+      # qmldiff binary, so assert the binary is there before trusting a pass.
       - name: Validate and apply the diffs
-        env:
-          QMLDIFF: /home/runner/.cargo/bin/qmldiff
-        run: ./app/qmd/scripts/validate.sh
+        run: |
+          qmldiff="$HOME/.cargo/bin/qmldiff"
+          test -x "$qmldiff" || { echo "::error::qmldiff missing at $qmldiff"; exit 1; }
+          QMLDIFF="$qmldiff" ./app/qmd/scripts/validate.sh | tee /tmp/validate.log
+          grep -q "qmldiff applied" /tmp/validate.log ||
+            { echo "::error::validate.sh did not run the apply check"; exit 1; }
       # The debug patch is generated, so a hand-edit or a stale regeneration
       # would otherwise ship traces that no longer match the real patch.
       - name: Debug patch is in step with its source
