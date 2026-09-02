@@ -7,6 +7,22 @@ a page, done — no cable, no desktop app, no cloud sync round-trip.
 Pair once by scanning a QR with your phone. After that the device talks to
 Notion directly.
 
+## What it looks like
+
+The whole flow happens on the device. Tap **Send to Notion** in the share
+menu, pick a destination page, and the render is appended to it.
+
+| Notebook | Share menu | Picker |
+|---|---|---|
+| ![A notebook page open in xochitl](docs/screenshots/notepad.png) | ![The share menu with a Send to Notion entry](docs/screenshots/menu.png) | ![The picker overlay listing pages grouped by account](docs/screenshots/dialog.png) |
+
+The picker groups pages under the workspace they belong to, so several
+connected accounts stay distinguishable. Format (PDF or SVG), attachment
+style (embedded or a download row) and a page range are all set in the
+footer before sending.
+
+![The sent page rendered on its Notion page](docs/screenshots/notion.png)
+
 ## Device compatibility
 
 | Device | Arch | Package | Status |
