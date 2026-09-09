@@ -5,8 +5,7 @@ on:
     branches: [master]
     paths:
       - "app/**"
-      - "packaging/**"
-      - ".github/workflows/release-app.yml"
+      - "packaging/vellum/10-notion-bridge.sh"
   workflow_dispatch:
 
 concurrency:
