@@ -10,7 +10,7 @@
 maintainer="Andrew Gierens <apgierens@gmail.com>"
 status="maintained"
 pkgname=rm-notion
-pkgver=0.1.1
+pkgver=0.1.5
 pkgrel=0
 upstream_author="andrewgierens"
 category=utilities
@@ -78,6 +78,6 @@ predeinstall() {
 }
 
 sha512sums="
-a87f6d4b3b85c0a8de1302304df746e7f29e48962d7cda50acc5e64540f376a7271d2bd397e72b2eb74047180e5081579ed3cbf1b5cca044012532a5d9f0352c  rm-notion-rm2-v0.1.1.tar.gz
-afcfc5dad66b184f7d83f01ca85418a65f8e5b8c9dd1b14469cc28dba2af18fe0ba4ce68205539fc8b911278464e1640de710b73d1894eeefc0defd3ea232748  rm-notion-rmpp-v0.1.1.tar.gz
+302faeffdeff30c4c3012c917937918daef7d3eb300530fe711614dc14e9311f1c759341ec09804ab0e1bb0f15136af94081911068863cdf583a37fd80c22bec  rm-notion-rm2-v0.1.5.tar.gz
+3de50631a2e5dd7b6ac7111f1496ee3710c6aa24e4724477fb3a58b31e1d46efe7313d6adab199f8ce2e5e1ae509b705959a7a1a7f83c55527542c0247380f84  rm-notion-rmpp-v0.1.5.tar.gz
 "
